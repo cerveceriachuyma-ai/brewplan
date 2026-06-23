@@ -12,7 +12,7 @@
         import { getAuth, signInWithEmailAndPassword, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-auth.js";
         import { getFirestore, collection, addDoc, getDocs, query, orderBy, deleteDoc, doc, updateDoc } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js";
 
-        // --- CONFIGURACIÓN INTEGRADA ---
+        // --- CONFIGURACIÓN ---
         const firebaseConfig = {
             apiKey: "AIzaSyBSaIzbcFiyTF1zy9_9Z97ZSPfL322xO24",
             authDomain: "inventariochuyma-da052.firebaseapp.com",
@@ -26,7 +26,7 @@
         const auth = getAuth(app);
         const db = getFirestore(app);
 
-        // --- LÓGICA DE CAPACIDAD ---
+        // --- LÓGICA DE PROCESOS Y CAPACIDAD ---
         const EQUIPMENT_LIMITS = { fermenter: 2, maturation: 2, carbonation: 1 };
 
         const RECIPES = {
@@ -58,6 +58,7 @@
         let productionQueue = [];
         let allBatches = [];
 
+        // --- UTILIDADES ---
         window.formatDate = (isoDate) => {
             if (!isoDate) return '';
             const [y, m, d] = isoDate.split('-');
@@ -86,7 +87,6 @@
         window.checkCapacityConflict = (newBatches) => {
             const usageTimeline = {};
             const all = [...allBatches, ...newBatches];
-            
             for (const b of all) {
                 for (const p of b.phases) {
                     if (p.equip) {
@@ -104,6 +104,7 @@
             return { conflict: false };
         };
 
+        // --- FUNCIONES CORE ---
         window.addToQueue = () => {
             const recipeKey = document.getElementById('recipeSelect').value;
             const count = parseInt(document.getElementById('batchCount').value || 1);
@@ -124,38 +125,55 @@
         window.programarProduccion = async () => {
             const startDateValue = document.getElementById('startDate').value;
             if (!startDateValue || productionQueue.length === 0) return;
+
+            let originalDate = new Date(startDateValue);
             
-            let currentCoccionDate = new Date(startDateValue);
-            let proposedBatches = [];
-            
-            for (const item of productionQueue) {
-                for (let i = 0; i < item.count; i++) {
-                    const phases = RECIPES[item.recipeKey].phases.map(p => ({
-                        name: p.name,
-                        offset: p.offset,
-                        duration: p.duration,
-                        equip: p.equip,
-                        date: addDaysWork(currentCoccionDate, p.offset, p.name)
-                    }));
-                    proposedBatches.push({ recipeKey: item.recipeKey, recipeName: item.name, phases });
-                    let next = new Date(currentCoccionDate);
-                    next.setDate(next.getDate() + 1);
-                    while (!isWorkingDay(next, 'Cocción')) next.setDate(next.getDate() + 1);
-                    currentCoccionDate = next;
+            const intentarProgramar = (fechaInicio) => {
+                let currentCoccionDate = new Date(fechaInicio);
+                let proposedBatches = [];
+                for (const item of productionQueue) {
+                    for (let i = 0; i < item.count; i++) {
+                        const phases = RECIPES[item.recipeKey].phases.map(p => ({
+                            name: p.name, offset: p.offset, duration: p.duration, equip: p.equip,
+                            date: addDaysWork(currentCoccionDate, p.offset, p.name)
+                        }));
+                        proposedBatches.push({ recipeKey: item.recipeKey, recipeName: item.name, phases });
+                        let next = new Date(currentCoccionDate);
+                        next.setDate(next.getDate() + 1);
+                        while (!isWorkingDay(next, 'Cocción')) next.setDate(next.getDate() + 1);
+                        currentCoccionDate = next;
+                    }
                 }
+                return { proposedBatches, conflict: checkCapacityConflict(proposedBatches) };
+            };
+
+            let resultado = intentarProgramar(originalDate);
+            let diasIntentados = 0;
+            const LIMITE_DIAS = 3; 
+            
+            while (resultado.conflict.conflict && diasIntentados < LIMITE_DIAS) {
+                let siguienteDia = new Date(originalDate);
+                siguienteDia.setDate(siguienteDia.getDate() + 1);
+                originalDate = siguienteDia;
+                resultado = intentarProgramar(originalDate);
+                diasIntentados++;
             }
 
-            const check = checkCapacityConflict(proposedBatches);
-            if (check.conflict) {
-                alert(`¡ALERTA! Conflicto detectado el ${formatDate(check.date)}. El equipo ${check.equip} está al límite.`);
+            if (resultado.conflict.conflict) {
+                alert("No hay espacio en los próximos 3 días. Ajusta la fecha manualmente.");
                 return;
             }
 
-            for (const b of proposedBatches) {
+            if (diasIntentados > 0) {
+                const fechaSugerida = formatDate(originalDate.toISOString().split('T')[0]);
+                if (!confirm(`Conflicto detectado. ¿Programar a partir del ${fechaSugerida}?`)) return;
+            }
+
+            for (const b of resultado.proposedBatches) {
                 await addDoc(collection(db, "brewplan_data"), { ...b, createdAt: new Date().getTime() });
             }
             productionQueue = []; renderQueue(); loadData();
-            alert("Producción programada exitosamente.");
+            alert("Producción programada.");
         };
 
         window.loadData = async () => {
@@ -175,7 +193,7 @@
                         <button onclick="deleteBatch('${docSnap.id}')" class="text-rose-400 text-xs">Eliminar</button>
                     </div>
                     <div class="space-y-3">
-                        ${b.phases.map((p, index) => `
+                        ${b.phases.map(p => `
                             <div class="grid grid-cols-2 items-center gap-4 text-sm">
                                 <span class="font-medium text-purple-700">${p.name}</span>
                                 <span class="text-right text-purple-900 font-bold">${formatDate(p.date)}</span>
@@ -187,7 +205,11 @@
             });
         };
 
-        window.deleteBatch = async (id) => { await deleteDoc(doc(db, "brewplan_data", id)); loadData(); };
+        window.deleteBatch = async (id) => { 
+            try { await deleteDoc(doc(db, "brewplan_data", id)); loadData(); } 
+            catch (e) { alert("Error al eliminar."); } 
+        };
+        
         window.login = () => signInWithEmailAndPassword(auth, document.getElementById('email').value, document.getElementById('password').value).catch(e => alert("Error: " + e.message));
         
         onAuthStateChanged(auth, (user) => {
