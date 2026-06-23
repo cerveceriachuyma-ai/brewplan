@@ -12,7 +12,6 @@
         import { getAuth, signInWithEmailAndPassword, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-auth.js";
         import { getFirestore, collection, addDoc, getDocs, query, orderBy, deleteDoc, doc, updateDoc } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js";
 
-        // --- CONFIGURACIÓN FIREBASE ---
         const firebaseConfig = {
             apiKey: "AIzaSyBSaIzbcFiyTF1zy9_9Z97ZSPfL322xO24",
             authDomain: "inventariochuyma-da052.firebaseapp.com",
@@ -26,7 +25,6 @@
         const auth = getAuth(app);
         const db = getFirestore(app);
 
-        // --- LÓGICA DE CAPACIDAD Y RECETAS ---
         const EQUIPMENT_LIMITS = { fermenter: 2, maturation: 2, carbonation: 1 };
 
         const RECIPES = {
@@ -37,7 +35,9 @@
                     { name: 'Fermentación', offset: 1, duration: 7, equip: 'fermenter' },
                     { name: 'Trasvasije', offset: 8, duration: 1, equip: null },
                     { name: 'Maduración', offset: 9, duration: 6, equip: 'maturation' },
-                    { name: 'Carbonatación y Envasado', offset: 15, duration: 2, equip: 'carbonation' }
+                    { name: 'Trasiego', offset: 15, duration: 1, equip: null },
+                    { name: 'Carbonatación', offset: 16, duration: 1, equip: 'carbonation' },
+                    { name: 'Envasado', offset: 17, duration: 1, equip: 'carbonation' }
                 ] 
             },
             amber: { 
@@ -47,8 +47,10 @@
                     { name: 'Fermentación', offset: 1, duration: 7, equip: 'fermenter' },
                     { name: 'Dry Hop + Descanso', offset: 8, duration: 3, equip: 'fermenter' },
                     { name: 'Trasvasije', offset: 11, duration: 1, equip: null },
-                    { name: 'Maduración', offset: 11, duration: 4, equip: 'maturation' },
-                    { name: 'Carbonatación y Envasado', offset: 15, duration: 2, equip: 'carbonation' }
+                    { name: 'Maduración', offset: 12, duration: 4, equip: 'maturation' },
+                    { name: 'Trasiego', offset: 16, duration: 1, equip: null },
+                    { name: 'Carbonatación', offset: 17, duration: 1, equip: 'carbonation' },
+                    { name: 'Envasado', offset: 18, duration: 1, equip: 'carbonation' }
                 ] 
             }
         };
@@ -58,7 +60,6 @@
         let productionQueue = [];
         let allBatches = [];
 
-        // --- FUNCIONES UTILITARIAS ---
         window.formatDate = (isoDate) => {
             if (!isoDate) return '';
             const [y, m, d] = isoDate.split('-');
@@ -104,7 +105,6 @@
             return { conflict: false };
         };
 
-        // --- FUNCIONES CORE ---
         window.addToQueue = () => {
             const recipeKey = document.getElementById('recipeSelect').value;
             const count = parseInt(document.getElementById('batchCount').value || 1);
@@ -145,7 +145,7 @@
 
             const check = checkCapacityConflict(proposedBatches);
             if (check.conflict) {
-                if(!confirm(`ALERTA: Conflicto de equipo en ${check.equip} detectado el ${formatDate(check.date)}. ¿Forzar programación de todas formas?`)) return;
+                if(!confirm(`ALERTA: Conflicto de equipo en ${check.equip} el ${formatDate(check.date)}. ¿Forzar programación?`)) return;
             }
 
             for (const b of proposedBatches) {
@@ -197,23 +197,43 @@
                 `;
                 container.appendChild(div);
             });
+            renderCalendar();
         };
 
-        window.deleteBatch = async (id) => { 
-            try { await deleteDoc(doc(db, "brewplan_data", id)); loadData(); } 
-            catch (e) { alert("Error al eliminar."); } 
-        };
-        
-        window.login = () => signInWithEmailAndPassword(auth, document.getElementById('email').value, document.getElementById('password').value).catch(e => alert("Error: " + e.message));
-        
-        onAuthStateChanged(auth, (user) => {
-            if (user) { 
-                document.getElementById('login-screen').classList.add('hidden'); 
-                document.getElementById('app-screen').classList.remove('hidden'); 
-                loadData(); 
-            }
-        });
+        function renderCalendar() {
+            const cal = document.getElementById('calendarContainer');
+            cal.innerHTML = '';
+            
+            // Agrupar por fecha
+            const tasksByDate = {};
+            allBatches.forEach(b => {
+                b.phases.forEach((p, index) => {
+                    if (!tasksByDate[p.date]) tasksByDate[p.date] = [];
+                    tasksByDate[p.date].push({ ...p, recipe: b.recipeName, batchId: b.id, index });
+                });
+            });
 
+            Object.keys(tasksByDate).sort().forEach(date => {
+                const div = document.createElement('div');
+                div.className = "bg-white p-4 mb-3 rounded-2xl border border-purple-100 shadow-sm";
+                div.innerHTML = `<div class="font-bold text-purple-900 mb-2">${formatDate(date)}</div>`;
+                
+                tasksByDate[date].forEach(t => {
+                    const isConflict = tasksByDate[date].filter(x => x.equip === t.equip && t.equip !== null).length > EQUIPMENT_LIMITS[t.equip];
+                    div.innerHTML += `
+                        <div class="flex items-center justify-between p-2 mb-1 bg-purple-50 rounded-lg text-sm">
+                            <span class="${isConflict ? 'text-rose-600 font-bold' : 'text-purple-700'}">${t.recipe}: ${t.name} ${isConflict ? '(¡SOBRECARGA!)' : ''}</span>
+                            <input type="date" value="${date}" onchange="saveBatch('${t.batchId}', '${t.recipe.toLowerCase().replace(' ale', '')}', ${t.index}, this.value)" class="bg-white p-1 rounded border border-purple-100">
+                        </div>
+                    `;
+                });
+                cal.appendChild(div);
+            });
+        }
+
+        window.deleteBatch = async (id) => { try { await deleteDoc(doc(db, "brewplan_data", id)); loadData(); } catch (e) { alert("Error."); } };
+        window.login = () => signInWithEmailAndPassword(auth, document.getElementById('email').value, document.getElementById('password').value).catch(e => alert(e.message));
+        onAuthStateChanged(auth, (user) => { if (user) { document.getElementById('login-screen').classList.add('hidden'); document.getElementById('app-screen').classList.remove('hidden'); loadData(); } });
         window.toggleView = (view) => {
             document.getElementById('listView').classList.toggle('hidden', view !== 'list');
             document.getElementById('calendarView').classList.toggle('hidden', view !== 'calendar');
@@ -233,9 +253,7 @@
         
         <div class="bg-white p-8 rounded-3xl shadow-sm border border-purple-100 mb-8">
             <h2 class="text-sm font-bold text-purple-400 uppercase tracking-widest mb-6">Planificación Mensual</h2>
-            <label class="block text-xs font-bold text-purple-800 mb-2">Fecha Inicio Producción</label>
             <input type="date" id="startDate" class="w-full p-4 bg-purple-50 border rounded-2xl mb-4">
-            
             <div class="grid grid-cols-2 gap-4">
                 <select id="recipeSelect" class="w-full p-4 bg-purple-50 border rounded-2xl">
                     <option value="amber">Amber Ale</option>
