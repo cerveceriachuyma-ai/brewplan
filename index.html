@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BrewPlan Pro - Gestión de Planta</title>
+    <title>BrewPlan Pro - Planificación Viva</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
     <style>
@@ -12,7 +12,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-app.js";
         import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-auth.js";
-        import { getFirestore, collection, addDoc, getDocs, query, orderBy, deleteDoc, doc } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js";
+        import { getFirestore, collection, addDoc, getDocs, query, orderBy, deleteDoc, doc, updateDoc } from "https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore.js";
 
         const firebaseConfig = {
             apiKey: "AIzaSyBSaIzbcFiyTF1zy9_9Z97ZSPfL322xO24",
@@ -29,18 +29,16 @@
 
         const CHILEAN_HOLIDAYS = ["2026-01-01", "2026-04-03", "2026-04-04", "2026-05-01", "2026-05-21", "2026-06-29", "2026-07-16", "2026-08-15", "2026-09-18", "2026-09-19", "2026-10-12", "2026-10-31", "2026-11-01", "2026-12-08", "2026-12-25"];
 
+        // Motor lógico de días hábiles
         function isWorkingDay(date, phaseName) {
             const day = date.getDay();
             const dateStr = date.toISOString().split('T')[0];
             const isHoliday = CHILEAN_HOLIDAYS.includes(dateStr);
-            
             if (day === 0 || isHoliday) return false;
-
             if (day === 6) {
-                const allowedSaturdayTasks = ['Trasiego a Barril', 'Carbonatación', 'Envasado'];
-                return allowedSaturdayTasks.includes(phaseName);
+                // Solo Cocción bloqueada
+                return phaseName !== 'Cocción';
             }
-            
             return true;
         }
 
@@ -55,16 +53,34 @@
         }
 
         const RECIPES = {
-            amber: { name: 'Amber Ale', phases: [{ name: 'Cocción', offset: 0 }, { name: 'Inicio de fermentación', offset: 1 }, { name: 'Trasvase a Maduración', offset: 7 }, { name: 'Trasiego a Barril', offset: 14 }, { name: 'Carbonatación', offset: 15 }, { name: 'Envasado', offset: 16 }] },
-            pale: { name: 'Pale Ale', phases: [{ name: 'Cocción', offset: 0 }, { name: 'Inicio de fermentación', offset: 1 }, { name: 'Trasvase a Maduración', offset: 7 }, { name: 'Trasiego a Barril', offset: 14 }, { name: 'Carbonatación', offset: 15 }, { name: 'Envasado', offset: 16 }] }
+            amber: { 
+                name: 'Amber Ale', 
+                phases: [
+                    { name: 'Cocción', offset: 0 }, 
+                    { name: 'Inicio de fermentación', offset: 1 }, 
+                    { name: 'Dry Hop', offset: 7 }, 
+                    { name: 'Descanso de Diacetilo', offset: 8 },
+                    { name: 'Trasvasije a Maduración', offset: 9 },
+                    { name: 'Maduración', offset: 10 }, 
+                    { name: 'Trasiego a Carbonatación', offset: 15 },
+                    { name: 'Envasado', offset: 16 }
+                ] 
+            },
+            pale: { 
+                name: 'Pale Ale', 
+                phases: [
+                    { name: 'Cocción', offset: 0 }, 
+                    { name: 'Inicio de fermentación', offset: 1 }, 
+                    { name: 'Descanso de Diacetilo', offset: 7 }, 
+                    { name: 'Trasvasije a Maduración', offset: 8 },
+                    { name: 'Maduración', offset: 9 }, 
+                    { name: 'Trasiego a Carbonatación', offset: 15 },
+                    { name: 'Envasado', offset: 16 }
+                ] 
+            }
         };
 
-        window.login = () => {
-            const email = document.getElementById('email').value;
-            const pass = document.getElementById('password').value;
-            signInWithEmailAndPassword(auth, email, pass).catch(e => console.error(e));
-        };
-
+        window.login = () => signInWithEmailAndPassword(auth, document.getElementById('email').value, document.getElementById('password').value).catch(e => alert(e.message));
         window.logout = () => signOut(auth);
 
         window.addBatches = async () => {
@@ -76,9 +92,11 @@
             let currentStart = new Date(startDateValue);
             for (let i = 0; i < count; i++) {
                 const batch = {
+                    recipeKey: recipeKey,
                     recipeName: RECIPES[recipeKey].name,
                     phases: RECIPES[recipeKey].phases.map(p => ({
                         name: p.name,
+                        offset: p.offset,
                         date: addDaysWork(currentStart, p.offset, p.name)
                     })),
                     createdAt: new Date()
@@ -89,7 +107,34 @@
             loadData();
         };
 
-        async function loadData() {
+        window.saveBatch = async (id, recipeKey) => {
+            const phaseContainer = document.getElementById(`phases-${id}`);
+            const inputs = phaseContainer.querySelectorAll('input');
+            
+            // Tomamos el cambio del usuario y recalculamos todo basado en el offset original
+            const changedInput = event.target;
+            const changedIndex = parseInt(changedInput.dataset.index);
+            const newDate = new Date(changedInput.value);
+            const offsetOfChanged = RECIPES[recipeKey].phases[changedIndex].offset;
+
+            // Recalculamos la fecha de inicio efectiva (Cocción)
+            // startTime = fecha_nueva - offset_de_la_tarea_editada
+            // Como las fechas en JS son complejas, simplificamos:
+            let effectiveStartDate = new Date(newDate);
+            effectiveStartDate.setDate(effectiveStartDate.getDate() - offsetOfChanged);
+
+            // Generamos todas las fases nuevas
+            const updatedPhases = RECIPES[recipeKey].phases.map((p, index) => ({
+                name: p.name,
+                offset: p.offset,
+                date: addDaysWork(effectiveStartDate, p.offset, p.name)
+            }));
+
+            await updateDoc(doc(db, "brewplan_data", id), { phases: updatedPhases });
+            loadData();
+        };
+
+        window.loadData = async () => {
             const q = query(collection(db, "brewplan_data"), orderBy("createdAt", "desc"));
             const snapshot = await getDocs(q);
             const container = document.getElementById('dashboard');
@@ -103,31 +148,24 @@
                         <h3 class="font-bold text-purple-900 text-lg tracking-tight">${b.recipeName}</h3>
                         <button onclick="deleteBatch('${docSnap.id}')" class="text-rose-400 text-xs font-semibold uppercase tracking-widest hover:text-rose-600">Eliminar</button>
                     </div>
-                    <div class="space-y-2">
-                        ${b.phases.map(p => `<p class="text-sm flex justify-between text-purple-700">
-                            <span class="font-medium">${p.name}</span>
-                            <span class="font-bold text-purple-950">${p.date}</span>
-                        </p>`).join('')}
+                    <div class="space-y-3" id="phases-${docSnap.id}">
+                        ${b.phases.map((p, index) => `
+                            <div class="flex justify-between items-center text-sm">
+                                <span class="font-medium text-purple-700">${p.name}</span>
+                                <input type="date" value="${p.date}" data-index="${index}" onchange="saveBatch('${docSnap.id}', '${b.recipeKey}')" class="bg-purple-50 p-1 rounded-lg text-purple-950 font-bold tabular-nums outline-none focus:ring-2 focus:ring-purple-200">
+                            </div>
+                        `).join('')}
                     </div>
                 `;
                 container.appendChild(div);
             });
-        }
-
-        window.deleteBatch = async (id) => {
-            await deleteDoc(doc(db, "brewplan_data", id));
-            loadData();
         };
 
+        window.deleteBatch = async (id) => { await deleteDoc(doc(db, "brewplan_data", id)); loadData(); };
+
         onAuthStateChanged(auth, (user) => {
-            if (user) {
-                document.getElementById('login-screen').classList.add('hidden');
-                document.getElementById('app-screen').classList.remove('hidden');
-                loadData();
-            } else {
-                document.getElementById('login-screen').classList.remove('hidden');
-                document.getElementById('app-screen').classList.add('hidden');
-            }
+            if (user) { document.getElementById('login-screen').classList.add('hidden'); document.getElementById('app-screen').classList.remove('hidden'); loadData(); }
+            else { document.getElementById('login-screen').classList.remove('hidden'); document.getElementById('app-screen').classList.add('hidden'); }
         });
     </script>
 </head>
